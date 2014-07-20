@@ -1,0 +1,126 @@
+/*
+	File: fn_queryRequest.sqf
+	Author: Bryan "Tonic" Boardwine
+	
+	Description:
+	Handles the incoming request and sends an asynchronous query 
+	request to the database.
+	
+	Return:
+	ARRAY - If array has 0 elements it should be handled as an error in client-side files.
+	STRING - The request had invalid handles or an unknown error and is logged to the RPT.
+*/
+private["_uid","_side","_query","_return","_queryResult","_qResult","_handler","_thread","_handlerhousing","_queryHousingResult","_tickTime","_loops"];
+_uid = [_this,0,"",[""]] call BIS_fnc_param;
+_side = [_this,1,sideUnknown,[civilian]] call BIS_fnc_param;
+_ownerID = [_this,2,ObjNull,[ObjNull]] call BIS_fnc_param;
+
+if(isNull _ownerID) exitWith {};
+_ownerID = owner _ownerID;
+//if(_uid == "" || _side == sideUnknown) exitWith {"The UID or side passed had invalid inputs."};
+
+_handler = {
+	private["_thread"];
+	_thread = [_this select 0,true,_this select 1] spawn DB_fnc_asyncCall;
+	waitUntil {scriptDone _thread};
+};
+
+//compile our query request
+_query = switch(_side) do {
+	case west: {format["SELECT playerid, name, cash, bankacc, adminlevel, donatorlvl, cop_licenses, coplevel, cop_gear, blacklist FROM players WHERE playerid='%1'",_uid];};
+	case civilian: {format["SELECT playerid, name, cash, bankacc, adminlevel, donatorlvl, civ_licenses, arrested, civ_gear FROM players WHERE playerid='%1'",_uid];};
+	case independent: {format["SELECT playerid, name, cash, bankacc, adminlevel, donatorlvl, med_licenses, mediclevel FROM players WHERE playerid='%1'",_uid];};
+	case east: {format["SELECT playerid, name, cash, bankacc, adminlevel, donatorlvl, adac_licenses, adaclevel, adac_gear FROM players WHERE playerid='%1'",_uid];};
+};
+
+waitUntil{!DB_Async_Active};
+
+_tickTime = diag_tickTime;
+_loops = 0;
+diag_log "------------- Client Query Request -------------";
+while {true} do {
+	_thread = [_query,_uid] spawn _handler;
+	waitUntil {scriptDone _thread};
+	sleep 0.2;
+	_queryResult = missionNamespace getVariable format["QUERY_%1",_uid];
+	if(!isNil "_queryResult") exitWith {};
+	_loops = _loops + 1;
+};
+
+diag_log format["Time to complete: %1 (in seconds) with %2 loops",(diag_tickTime - _tickTime),_loops];
+diag_log format["Result: %1",_queryResult];
+diag_log "------------------------------------------------";
+
+missionNamespace setVariable[format["QUERY_%1",_uid],nil]; //Unset the variable.
+
+if(typeName _queryResult == "STRING") exitWith {
+	[[],"SOCK_fnc_insertPlayerInfo",_ownerID,false,true] spawn life_fnc_MP;
+};
+
+
+//Parse licenses (Always index 6)
+_new = [(_queryResult select 6)] call DB_fnc_mresToArray;
+if(typeName _new == "STRING") then {_new = call compile format["%1", _new];};
+_queryResult set[6,_new];
+
+//Convert tinyint to boolean
+_old = _queryResult select 6;
+for "_i" from 0 to (count _old)-1 do
+{
+	_data = _old select _i;
+	_old set[_i,[_data select 0, ([_data select 1,1] call DB_fnc_bool)]];
+};
+
+_queryResult set[6,_old];
+//Parse data for specific side.
+switch (_side) do {
+	case west: {
+		_new = [(_queryResult select 8)] call DB_fnc_mresToArray;
+		if(typeName _new == "STRING") then {_new = call compile format["%1", _new];};
+		_queryResult set[8,_new];
+	};
+	
+	case civilian: {
+		_new = [(_queryResult select 8)] call DB_fnc_mresToArray;
+		if(typeName _new == "STRING") then {_new = call compile format["%1", _new];};
+		_queryResult set[8,_new];
+	};
+	
+	case east: {
+		_new = [(_queryResult select 8)] call DB_fnc_mresToArray;
+		if(typeName _new == "STRING") then {_new = call compile format["%1", _new];};
+		_queryResult set[8,_new];
+	};
+};
+
+_queryGangResult = [];
+switch (_side) do {
+    case civilian: {
+        _queryGang = format["SELECT gang_players.playerid, gangs.id, gangs.gangname, gangs.locked, gang_players.rank FROM gangs LEFT JOIN gang_players on gang_players.gangid=gangs.id WHERE gang_players.playerid='%1'",_uid];
+        waitUntil{!DB_Async_Active};
+            while {true} do {
+            _threadGang = [_queryGang,_uid] spawn _handler;
+            waitUntil {scriptDone _threadGang};
+            sleep 0.2;
+            _queryGangResult = missionNamespace getVariable format["QUERY_%1",_uid];
+            if(!isNil "_queryResult") exitWith {};
+        };
+        missionNamespace setVariable[format["QUERY_%1",_uid],nil]; //Unset the variable.
+        if (typeName _queryGangResult != "STRING") then {
+            _old = _queryGangResult select 3;
+            _new = [parseNumber(_old), 1] call DB_fnc_bool;
+            _queryGangResult set [3, _new];
+            _queryResult set[10, _queryGangResult];
+        };
+    };    
+};
+
+_ret = [];
+switch (_side) do {
+        case civilian: {
+	   _ret = [_uid, _side] call BRUUUDIS_fnc_queryPlayerHouses;
+           _queryResult set [9, _ret];
+	};
+};
+
+[_queryResult,"SOCK_fnc_requestReceived",_ownerID,false] spawn life_fnc_MP;
